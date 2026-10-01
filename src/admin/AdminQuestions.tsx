@@ -1,8 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Question, MateriPAI, Difficulty, QuestionType, QuestionOption } from '../types';
 import { storageService, subscribeToStore } from '../services/storageService';
-import { sheetsSyncService } from '../services/sheetsSyncService';
+import {
+  sheetsSyncService,
+  normalizeQuestionType,
+  parseBSStatements,
+  extractSpreadsheetId
+} from '../services/sheetsSyncService';
 import { sheetsExportService } from '../services/sheetsExportService';
+import { excelUtils } from '../utils/excelUtils';
 import { AdminQuestionForm } from './AdminQuestionForm';
 import { useToast } from '../components/Toast';
 import {
@@ -23,7 +29,13 @@ import {
   Info,
   CircleDot,
   CheckSquare,
-  ListChecks
+  ListChecks,
+  Upload,
+  Download,
+  ExternalLink,
+  Sparkles,
+  Globe,
+  Database
 } from 'lucide-react';
 
 const MATERI_LIST = [
@@ -51,6 +63,22 @@ export const AdminQuestions: React.FC = () => {
   const [isSyncing, setIsSyncing] = useState(false);
   const [isPulling, setIsPulling] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  // Pull / Sync from Spreadsheet & Server Engine Modal state
+  const [isPullModalOpen, setIsPullModalOpen] = useState(false);
+  const [pullUrl, setPullUrl] = useState(() => sheetsSyncService.getUrl());
+  const [isPullLoading, setIsPullLoading] = useState(false);
+  const [pullDetailedResult, setPullDetailedResult] = useState<{
+    success: boolean;
+    questions?: Question[];
+    count?: number;
+    source?: string;
+    error?: string;
+    hint?: string;
+    requiresAuth?: boolean;
+    spreadsheetId?: string;
+  } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Paste / Import from Spreadsheet modal state
   const [isPasteOpen, setIsPasteOpen] = useState(false);
@@ -108,20 +136,166 @@ export const AdminQuestions: React.FC = () => {
     }
   };
 
+  const handleOpenPullModal = () => {
+    setPullUrl(sheetsSyncService.getUrl());
+    setPullDetailedResult(null);
+    setIsPullModalOpen(true);
+  };
+
+  const handleExecutePullModal = async (overrideUrl?: string) => {
+    const targetUrl = (overrideUrl || pullUrl).trim();
+    if (!targetUrl) {
+      showToast('Masukkan Link Google Spreadsheet atau URL Web App Apps Script.', 'error');
+      return;
+    }
+
+    setIsPullLoading(true);
+    setPullDetailedResult(null);
+
+    try {
+      // Simpan URL agar tersimpan untuk seterusnya
+      sheetsSyncService.setUrl(targetUrl);
+      const res = await sheetsSyncService.pullSpreadsheetDetailed(targetUrl);
+      setPullDetailedResult(res);
+
+      if (res.success && res.questions && res.questions.length > 0) {
+        showToast(`Alhamdulillah! Berhasil menemukan ${res.questions.length} butir soal dari ${res.source || 'server'}. Silakan klik "Terapkan" di bawah.`, 'success');
+      } else if (res.requiresAuth) {
+        showToast('Google Apps Script meminta otorisasi login akun.', 'warning');
+      } else {
+        showToast(res.error || 'Data soal di spreadsheet belum terbaca.', 'error');
+      }
+    } catch (err: any) {
+      setPullDetailedResult({
+        success: false,
+        error: err.message || 'Terjadi kesalahan jaringan saat menarik soal.',
+      });
+      showToast('Terjadi kesalahan saat memuat spreadsheet.', 'error');
+    } finally {
+      setIsPullLoading(false);
+    }
+  };
+
+  const handleApplyPulledQuestions = (replace: boolean) => {
+    if (!pullDetailedResult?.questions || pullDetailedResult.questions.length === 0) {
+      showToast('Tidak ada butir soal untuk diterapkan.', 'error');
+      return;
+    }
+
+    const list = pullDetailedResult.questions;
+    storageService.saveQuestions(list, replace);
+    showToast(
+      replace
+        ? `Alhamdulillah! Berhasil menggantikan seluruh bank soal dengan ${list.length} butir soal dari ${pullDetailedResult.source || 'spreadsheet'}.`
+        : `Alhamdulillah! Berhasil menambahkan ${list.length} butir soal baru ke bank soal.`,
+      'success'
+    );
+    setIsPullModalOpen(false);
+    setPullDetailedResult(null);
+    refreshData();
+  };
+
   const handlePullFromSheets = async () => {
     setIsPulling(true);
     try {
-      const pulled = await sheetsSyncService.pullQuestionsFromSheets();
-      if (pulled && pulled.length > 0) {
+      const detailed = await sheetsSyncService.pullSpreadsheetDetailed();
+      if (detailed.success && detailed.questions && detailed.questions.length > 0) {
+        storageService.saveQuestions(detailed.questions, true);
         setQuestions(storageService.getQuestions());
-        showToast(`Alhamdulillah! Berhasil memuat ${pulled.length} butir soal dari Google Spreadsheet. Bank soal aplikasi kini 100% sama dengan server.`, 'success');
+        showToast(`Alhamdulillah! Berhasil memuat ${detailed.questions.length} butir soal dari ${detailed.source || 'server'}. Bank soal aplikasi kini 100% sama dengan spreadsheet.`, 'success');
       } else {
-        showToast('Data soal dari server belum terbaca atau sheet BANK_SOAL masih kosong. Anda juga dapat menggunakan tombol "Tempel Soal" untuk memuat data langsung.', 'warning');
+        // Buka modal secara otomatis agar admin bisa melihat diagnosa & mengubah link
+        setPullDetailedResult(detailed);
+        setPullUrl(sheetsSyncService.getUrl());
+        setIsPullModalOpen(true);
+        if (detailed.requiresAuth) {
+          showToast('Web App Google meminta login akun. Silakan cek solusi mudah di pop-up.', 'warning');
+        } else {
+          showToast(detailed.error || 'Data soal dari spreadsheet belum terbaca.', 'warning');
+        }
       }
     } catch {
-      showToast('Gagal menarik soal dari Google Spreadsheet. Cek URL Web App di menu Pengaturan.', 'error');
+      setIsPullModalOpen(true);
+      showToast('Gagal menarik soal dari Google Spreadsheet. Cek konfigurasi link.', 'error');
     } finally {
       setIsPulling(false);
+    }
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const items = await excelUtils.parseQuestionFile(file);
+      const validItems = items.filter((i) => i.isValid);
+
+      if (validItems.length === 0) {
+        showToast('Tidak ada butir soal valid yang dapat diimpor dari file tersebut.', 'error');
+        return;
+      }
+
+      const questionsToImport = validItems.map((item) => {
+        const isBS = item.type === 'BS';
+        const statements = isBS
+          ? [
+              {
+                id: 'S1',
+                text: item.optionA,
+                correct: item.correctAnswers.some((a) => a.includes('S1:BENAR') || a === 'A:BENAR' || a === 'BENAR')
+                  ? ('BENAR' as const)
+                  : ('SALAH' as const),
+              },
+              {
+                id: 'S2',
+                text: item.optionB,
+                correct: item.correctAnswers.some((a) => a.includes('S2:BENAR') || a === 'B:BENAR')
+                  ? ('BENAR' as const)
+                  : ('SALAH' as const),
+              },
+              {
+                id: 'S3',
+                text: item.optionC,
+                correct: item.correctAnswers.some((a) => a.includes('S3:BENAR') || a === 'C:BENAR')
+                  ? ('BENAR' as const)
+                  : ('SALAH' as const),
+              },
+              {
+                id: 'S4',
+                text: item.optionD,
+                correct: item.correctAnswers.some((a) => a.includes('S4:BENAR') || a === 'D:BENAR')
+                  ? ('BENAR' as const)
+                  : ('SALAH' as const),
+              },
+            ].filter((s) => Boolean(s.text))
+          : undefined;
+
+        return {
+          subject: item.subject,
+          topic: item.topic,
+          difficulty: item.difficulty,
+          type: item.type,
+          stimulus: item.stimulus || undefined,
+          question: item.question,
+          options: [
+            { id: 'A' as const, text: item.optionA },
+            { id: 'B' as const, text: item.optionB },
+            { id: 'C' as const, text: item.optionC },
+            { id: 'D' as const, text: item.optionD },
+          ],
+          statements,
+          correctAnswers: item.correctAnswers,
+          explanation: item.explanation || undefined,
+          isActive: true,
+        };
+      });
+
+      storageService.importQuestions(questionsToImport);
+      showToast(`Alhamdulillah! Berhasil mengimpor ${questionsToImport.length} butir soal dari file ${file.name}.`, 'success');
+      refreshData();
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    } catch {
+      showToast('Gagal memproses file Excel/CSV.', 'error');
     }
   };
 
@@ -177,42 +351,47 @@ export const AdminQuestions: React.FC = () => {
       const qText = (parts[cQ] || parts[4] || parts[0] || '').trim();
       if (!qText) continue;
 
-      const qTypeRaw = (parts[cType] || parts[1] || 'PG').toUpperCase().trim();
-      const qType: QuestionType = (qTypeRaw === 'PGK' || qTypeRaw === 'BS') ? qTypeRaw : 'PG';
+      const qTypeRaw = (parts[cType] || parts[1] || 'PG').trim();
+      const qType = normalizeQuestionType(qTypeRaw);
 
       const optA = (parts[cA] || parts[5] || '').trim();
       const optB = (parts[cB] || parts[6] || '').trim();
       const optC = (parts[cC] || parts[7] || '').trim();
       const optD = (parts[cD] || parts[8] || '').trim();
-
-      const options: QuestionOption[] = [];
-      if (optA) options.push({ id: 'A', text: optA });
-      if (optB) options.push({ id: 'B', text: optB });
-      if (optC) options.push({ id: 'C', text: optC });
-      if (optD) options.push({ id: 'D', text: optD });
-
       const rawKey = (parts[cKey] || parts[9] || 'A').trim();
-      const correctAnswers = rawKey.split(',').map((k) => k.trim().toUpperCase()).filter(Boolean);
 
+      let options: QuestionOption[] = [];
       let statements: { id: string; text: string; correct: 'BENAR' | 'SALAH' }[] | undefined = undefined;
+      let correctAnswers: string[] = [];
+
       if (qType === 'BS') {
-        statements = [];
-        if (optA) {
-          const isA = correctAnswers.some((a) => a.includes('S1:BENAR') || a === 'A:BENAR' || a === 'BENAR') ? 'BENAR' as const : 'SALAH' as const;
-          statements.push({ id: 'S1', text: optA, correct: isA });
-        }
-        if (optB) {
-          const isB = correctAnswers.some((a) => a.includes('S2:BENAR') || a === 'B:BENAR') ? 'BENAR' as const : 'SALAH' as const;
-          statements.push({ id: 'S2', text: optB, correct: isB });
-        }
-        if (optC) {
-          const isC = correctAnswers.some((a) => a.includes('S3:BENAR') || a === 'C:BENAR') ? 'BENAR' as const : 'SALAH' as const;
-          statements.push({ id: 'S3', text: optC, correct: isC });
-        }
-        if (optD) {
-          const isD = correctAnswers.some((a) => a.includes('S4:BENAR') || a === 'D:BENAR') ? 'BENAR' as const : 'SALAH' as const;
-          statements.push({ id: 'S4', text: optD, correct: isD });
-        }
+        const bsResult = parseBSStatements(optA, optB, optC, optD, rawKey);
+        statements = bsResult.statements;
+        correctAnswers = bsResult.correctAnswers;
+        options = [
+          { id: 'A' as const, text: optA || 'Pernyataan 1' },
+          { id: 'B' as const, text: optB || 'Pernyataan 2' },
+          ...(optC ? [{ id: 'C' as const, text: optC }] : []),
+          ...(optD ? [{ id: 'D' as const, text: optD }] : []),
+        ];
+      } else if (qType === 'PGK') {
+        options = [
+          { id: 'A' as const, text: optA },
+          { id: 'B' as const, text: optB },
+          { id: 'C' as const, text: optC },
+          { id: 'D' as const, text: optD },
+        ].filter((o) => Boolean(o.text));
+        correctAnswers = rawKey.split(/[,;\s]+/).map((k) => k.trim().toUpperCase()).filter(Boolean);
+        if (correctAnswers.length === 0) correctAnswers = ['A'];
+      } else {
+        options = [
+          { id: 'A' as const, text: optA },
+          { id: 'B' as const, text: optB },
+          { id: 'C' as const, text: optC },
+          { id: 'D' as const, text: optD },
+        ].filter((o) => Boolean(o.text));
+        const firstKey = rawKey.split(/[,;\s]+/)[0]?.trim().toUpperCase() || 'A';
+        correctAnswers = [firstKey];
       }
 
       const rawTopic = (parts[cTopic] || parts[2] || 'Aqidah').trim();
@@ -244,7 +423,7 @@ export const AdminQuestions: React.FC = () => {
         question: qText,
         options,
         statements,
-        correctAnswers: correctAnswers.length > 0 ? correctAnswers : ['A'],
+        correctAnswers,
         explanation: (parts[cExp] || parts[10] || '-').trim(),
         isActive: true,
         createdAt: new Date().toISOString(),
@@ -311,15 +490,33 @@ export const AdminQuestions: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2 flex-wrap self-start sm:self-auto">
+          {/* Input file tersembunyi untuk upload langsung dari bank soal */}
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileUpload}
+            accept=".xlsx, .xls, .csv"
+            className="hidden"
+          />
+
           <button
             type="button"
-            onClick={handlePullFromSheets}
-            disabled={isPulling}
-            className="flex items-center gap-1.5 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 px-3 py-2 rounded-lg font-medium text-xs shadow-2xs transition cursor-pointer disabled:opacity-50"
-            title="Tarik data soal terbaru dari Google Spreadsheet"
+            onClick={handleOpenPullModal}
+            className="flex items-center gap-1.5 bg-emerald-800 hover:bg-emerald-900 text-white px-3.5 py-2 rounded-lg font-bold text-xs shadow-xs transition cursor-pointer"
+            title="Buka panel tarik soal dari Google Spreadsheet atau Apps Script Server"
           >
-            <RefreshCw className={`w-3.5 h-3.5 text-emerald-700 ${isPulling ? 'animate-spin' : ''}`} />
-            <span>{isPulling ? 'Menarik...' : 'Tarik dari Sheets'}</span>
+            <RefreshCw className={`w-3.5 h-3.5 ${isPulling || isPullLoading ? 'animate-spin' : ''}`} />
+            <span>Tarik dari Server / Sheets</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="flex items-center gap-1.5 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 px-3 py-2 rounded-lg font-semibold text-xs shadow-2xs transition cursor-pointer"
+            title="Upload file Excel (.xlsx / .csv) butir soal langsung"
+          >
+            <Upload className="w-3.5 h-3.5 text-emerald-700" />
+            <span>Upload Excel</span>
           </button>
 
           <button
@@ -336,10 +533,10 @@ export const AdminQuestions: React.FC = () => {
             type="button"
             onClick={handleSyncToSheets}
             disabled={isSyncing}
-            className="flex items-center gap-1.5 bg-emerald-800 hover:bg-emerald-900 text-white px-3.5 py-2 rounded-lg font-bold text-xs shadow-2xs transition cursor-pointer disabled:opacity-50"
+            className="flex items-center gap-1.5 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 px-3 py-2 rounded-lg font-semibold text-xs shadow-2xs transition cursor-pointer disabled:opacity-50"
             title="Kirim seluruh butir soal ke Google Spreadsheet via Web App"
           >
-            <Send className="w-3.5 h-3.5" />
+            <Send className="w-3.5 h-3.5 text-emerald-700" />
             <span>{isSyncing ? 'Mengirim...' : 'Kirim ke Sheets'}</span>
           </button>
 
@@ -376,7 +573,7 @@ export const AdminQuestions: React.FC = () => {
               setEditingQuestion(null);
               setIsFormOpen(true);
             }}
-            className="flex items-center gap-2 bg-[#087443] hover:bg-[#065b34] text-white px-4 py-2 rounded-lg font-medium text-xs shadow-xs transition cursor-pointer"
+            className="flex items-center gap-2 bg-[#087443] hover:bg-[#065b34] text-white px-4 py-2 rounded-lg font-bold text-xs shadow-xs transition cursor-pointer"
           >
             <Plus className="w-4 h-4" />
             <span>Tambah Soal Baru</span>
@@ -743,6 +940,267 @@ export const AdminQuestions: React.FC = () => {
           ))
         )}
       </div>
+
+      {/* Modal Tarik Bank Soal dari Server & Google Spreadsheet */}
+      {isPullModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-3xl overflow-hidden flex flex-col max-h-[92vh] animate-in fade-in zoom-in-95 duration-200">
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 bg-[#087443] text-white">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-emerald-700/50 flex items-center justify-center border border-emerald-500/50">
+                  <RefreshCw className={`w-4 h-4 text-emerald-200 ${isPullLoading ? 'animate-spin' : ''}`} />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm sm:text-base leading-tight">
+                    Tarik Bank Soal dari Google Spreadsheet / Server
+                  </h3>
+                  <p className="text-[11px] text-emerald-100 font-normal">
+                    Muat butir soal PG, PGK, dan Benar/Salah (BS) secara online ke aplikasi CBT
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsPullModalOpen(false)}
+                className="p-1 rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="p-6 space-y-4 overflow-y-auto flex-1 text-xs sm:text-sm">
+              {/* Petunjuk format input */}
+              <div className="p-3.5 rounded-xl bg-emerald-50/80 border border-emerald-200 text-emerald-950 space-y-1 text-xs leading-relaxed">
+                <span className="font-bold flex items-center gap-1.5 text-[#087443]">
+                  <Sparkles className="w-4 h-4" />
+                  <span>Mendukung 2 Cara Mudah Pengambilan Data Online:</span>
+                </span>
+                <ul className="list-disc pl-4 space-y-0.5 text-slate-700 text-[11px] pt-1">
+                  <li>
+                    <strong>Link Google Spreadsheet (Rekomendasi Tercepat):</strong> Cukup tempel link spreadsheet (misal: <code className="bg-white px-1 py-0.5 rounded border border-emerald-200 font-mono text-emerald-800">https://docs.google.com/spreadsheets/d/...</code>) dan pastikan hak aksesnya <em>&quot;Siapa saja yang memiliki link dapat melihat&quot;</em>.
+                  </li>
+                  <li>
+                    <strong>Web App Google Apps Script:</strong> Gunakan URL Web App (<code className="bg-white px-1 py-0.5 rounded border border-emerald-200 font-mono text-emerald-800">https://script.google.com/macros/s/.../exec</code>) dengan deployment akses <em>&quot;Anyone / Siapa Saja&quot;</em>.
+                  </li>
+                </ul>
+              </div>
+
+              {/* Input URL */}
+              <div className="space-y-1.5">
+                <label className="block text-xs font-bold text-slate-800 flex items-center justify-between">
+                  <span>URL Google Spreadsheet atau Web App Apps Script:</span>
+                  <span className="text-[11px] text-slate-400 font-normal">Sheet tab: BANK_SOAL / SOAL</span>
+                </label>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input
+                    type="url"
+                    value={pullUrl}
+                    onChange={(e) => setPullUrl(e.target.value)}
+                    placeholder="https://docs.google.com/spreadsheets/d/1.../edit atau https://script.google.com/macros/s/.../exec"
+                    className="flex-1 p-2.5 rounded-xl border border-slate-300 font-mono text-xs focus:outline-none focus:border-[#087443] focus:ring-1 focus:ring-[#087443] bg-white text-slate-900"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleExecutePullModal()}
+                    disabled={isPullLoading || !pullUrl.trim()}
+                    className="py-2.5 px-5 bg-[#087443] hover:bg-[#065b34] text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer shadow-xs disabled:opacity-50 shrink-0"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isPullLoading ? 'animate-spin' : ''}`} />
+                    <span>{isPullLoading ? 'Sedang Menarik...' : 'Tarik Soal Sekarang'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Status & Hasil Analisis */}
+              {pullDetailedResult && (
+                <div className="space-y-3 pt-2">
+                  {pullDetailedResult.success && pullDetailedResult.questions ? (
+                    <div className="p-4 bg-emerald-50 rounded-xl border border-emerald-300 space-y-3">
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <span className="font-bold text-xs sm:text-sm text-emerald-950 flex items-center gap-2">
+                          <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                          <span>
+                            Ditemukan {pullDetailedResult.questions.length} Butir Soal ({pullDetailedResult.source})
+                          </span>
+                        </span>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {(() => {
+                            const qList = pullDetailedResult.questions;
+                            const pg = qList.filter((q) => q.type === 'PG').length;
+                            const pgk = qList.filter((q) => q.type === 'PGK').length;
+                            const bs = qList.filter((q) => q.type === 'BS').length;
+                            return (
+                              <>
+                                <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-white text-emerald-800 border border-emerald-200">
+                                  {pg} PG
+                                </span>
+                                <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-white text-indigo-800 border border-indigo-200">
+                                  {pgk} PGK
+                                </span>
+                                <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-white text-amber-800 border border-amber-200">
+                                  {bs} Benar/Salah
+                                </span>
+                              </>
+                            );
+                          })()}
+                        </div>
+                      </div>
+
+                      {/* Preview Daftar Soal */}
+                      <div className="max-h-56 overflow-y-auto border border-emerald-200 rounded-lg divide-y divide-slate-100 bg-white">
+                        {pullDetailedResult.questions.slice(0, 5).map((q, idx) => (
+                          <div key={q.id || idx} className="p-2.5 text-xs space-y-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-bold text-slate-800">#{idx + 1}</span>
+                              <span
+                                className={`px-1.5 py-0.2 rounded text-[10px] font-black ${
+                                  q.type === 'PG'
+                                    ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
+                                    : q.type === 'PGK'
+                                    ? 'bg-indigo-100 text-indigo-900 border border-indigo-300'
+                                    : 'bg-amber-100 text-amber-900 border border-amber-300'
+                                }`}
+                              >
+                                {q.type}
+                              </span>
+                              <span className="text-[11px] text-slate-600 font-semibold">{q.topic}</span>
+                              <span className="text-[10px] text-slate-400">({q.difficulty})</span>
+                            </div>
+                            <p className="text-slate-900 line-clamp-1 font-medium">{q.question}</p>
+                            <p className="text-[11px] text-slate-500">
+                              Kunci: <strong className="text-emerald-800">{q.correctAnswers.join(', ')}</strong> •{' '}
+                              {q.type === 'BS'
+                                ? `${q.statements?.length || 0} Pernyataan`
+                                : `${q.options?.length || 0} Opsi Pilihan`}
+                            </p>
+                          </div>
+                        ))}
+                        {pullDetailedResult.questions.length > 5 && (
+                          <div className="p-2 text-center text-[11px] text-slate-500 font-medium bg-slate-50">
+                            ...dan {pullDetailedResult.questions.length - 5} butir soal lainnya siap diterapkan
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Tombol Terapkan */}
+                      <div className="flex items-center justify-end gap-2 pt-1 flex-wrap">
+                        <button
+                          type="button"
+                          onClick={() => handleApplyPulledQuestions(false)}
+                          className="px-4 py-2 bg-white hover:bg-slate-50 border border-slate-300 text-slate-800 font-semibold rounded-lg text-xs shadow-2xs transition cursor-pointer"
+                        >
+                          Tambahkan ke Bank Soal
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleApplyPulledQuestions(true)}
+                          className="px-4 py-2 bg-[#087443] hover:bg-[#065b34] text-white font-bold rounded-lg text-xs shadow-xs transition flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                          <span>Terapkan & Gantikan Bank Soal (100% Sinkron)</span>
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    /* Error / Auth Required Card */
+                    <div className="p-4 bg-amber-50 rounded-xl border border-amber-300 text-xs text-amber-950 space-y-2">
+                      <div className="flex items-center gap-2 font-bold text-amber-900">
+                        <AlertCircle className="w-4 h-4 text-amber-700 shrink-0" />
+                        <span>Koneksi Server / Spreadsheet Membutuhkan Penyesuaian</span>
+                      </div>
+                      <p className="text-slate-700 leading-relaxed">
+                        {pullDetailedResult.error || 'Data soal di spreadsheet belum terbaca.'}
+                      </p>
+
+                      {pullDetailedResult.requiresAuth && (
+                        <div className="p-3 bg-white rounded-lg border border-amber-200 space-y-2 text-[11px] leading-relaxed">
+                          <span className="font-bold text-amber-950 block">
+                            💡 2 Solusi Cepat untuk Memasukkan Bank Soal:
+                          </span>
+                          <div className="space-y-1 text-slate-700">
+                            <p>
+                              <strong>Solusi 1 (Paling Mudah):</strong> Buka file Google Spreadsheet Anda di Google Drive, klik tombol biru <strong>Bagikan (Share)</strong> di pojok kanan atas, lalu ubah <em>Akses umum</em> menjadi <strong>&quot;Siapa saja yang memiliki link dapat melihat&quot;</strong>. Salin link spreadsheet-nya lalu tempelkan di kotak input atas.
+                            </p>
+                            <p>
+                              <strong>Solusi 2:</strong> Atau cukup blok dan copy baris soal Anda di Google Sheets, lalu klik tombol <strong>Tempel Soal (Ctrl+V)</strong> di bawah ini!
+                            </p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Opsi Tambahan Cepat */}
+              <div className="pt-3 border-t border-slate-200">
+                <span className="block text-xs font-bold text-slate-700 mb-2">
+                  Metode Alternatif Lainnya:
+                </span>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsPullModalOpen(false);
+                      setIsPasteOpen(true);
+                    }}
+                    className="p-2.5 bg-white hover:bg-slate-50 border border-slate-200 rounded-xl text-left flex items-center gap-2 transition cursor-pointer"
+                  >
+                    <ClipboardPaste className="w-4 h-4 text-emerald-700 shrink-0" />
+                    <div>
+                      <span className="text-xs font-bold text-slate-800 block">Tempel (Ctrl+V)</span>
+                      <span className="text-[10px] text-slate-500">Paste baris spreadsheet</span>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsPullModalOpen(false);
+                      fileInputRef.current?.click();
+                    }}
+                    className="p-2.5 bg-white hover:bg-slate-50 border border-slate-200 rounded-xl text-left flex items-center gap-2 transition cursor-pointer"
+                  >
+                    <Upload className="w-4 h-4 text-indigo-700 shrink-0" />
+                    <div>
+                      <span className="text-xs font-bold text-slate-800 block">Upload File Excel</span>
+                      <span className="text-[10px] text-slate-500">Impor file .xlsx / .csv</span>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => excelUtils.downloadQuestionTemplate()}
+                    className="p-2.5 bg-white hover:bg-slate-50 border border-slate-200 rounded-xl text-left flex items-center gap-2 transition cursor-pointer"
+                  >
+                    <Download className="w-4 h-4 text-[#087443] shrink-0" />
+                    <div>
+                      <span className="text-xs font-bold text-slate-800 block">Download Template</span>
+                      <span className="text-[10px] text-slate-500">Format kolom resmi MGMP</span>
+                    </div>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="flex items-center justify-between px-6 py-3.5 bg-slate-50 border-t border-slate-200">
+              <span className="text-[11px] text-slate-500">
+                Penyimpanan otomatis sinkron ke perangkat penguji & peserta CBT.
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsPullModalOpen(false)}
+                className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 font-semibold rounded-lg text-xs transition cursor-pointer"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Form Modal */}
       {isFormOpen && (

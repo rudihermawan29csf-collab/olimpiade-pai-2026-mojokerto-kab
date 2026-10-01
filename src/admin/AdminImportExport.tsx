@@ -1,6 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { excelUtils, ImportPreviewItem } from '../utils/excelUtils';
 import { storageService } from '../services/storageService';
+import { parseBSStatements } from '../services/sheetsSyncService';
 import { useToast } from '../components/Toast';
 import {
   FileSpreadsheet,
@@ -48,14 +49,14 @@ export const AdminImportExport: React.FC = () => {
 
     const payload = validItems.map((item) => {
       const isBS = item.type === 'BS';
-      const statements = isBS
-        ? [
-            { id: 'S1', text: item.optionA, correct: item.correctAnswers.some((a) => a.includes('S1:BENAR') || a === 'A:BENAR' || a === 'BENAR') ? 'BENAR' as const : 'SALAH' as const },
-            { id: 'S2', text: item.optionB, correct: item.correctAnswers.some((a) => a.includes('S2:BENAR') || a === 'B:BENAR') ? 'BENAR' as const : 'SALAH' as const },
-            { id: 'S3', text: item.optionC, correct: item.correctAnswers.some((a) => a.includes('S3:BENAR') || a === 'C:BENAR') ? 'BENAR' as const : 'SALAH' as const },
-            { id: 'S4', text: item.optionD, correct: item.correctAnswers.some((a) => a.includes('S4:BENAR') || a === 'D:BENAR') ? 'BENAR' as const : 'SALAH' as const },
-          ].filter((s) => Boolean(s.text))
-        : undefined;
+      let statements = undefined;
+      let correctAnswers = item.correctAnswers;
+
+      if (isBS) {
+        const bsRes = parseBSStatements(item.optionA, item.optionB, item.optionC, item.optionD, item.correctAnswers.join(','));
+        statements = bsRes.statements;
+        correctAnswers = bsRes.correctAnswers;
+      }
 
       return {
         subject: item.subject,

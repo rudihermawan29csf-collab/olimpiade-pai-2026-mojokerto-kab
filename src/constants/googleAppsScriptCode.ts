@@ -319,9 +319,12 @@ function getQuestionsFromSheet(ss) {
     var qId = String((cId >= 0 ? row[cId] : row[0]) || '').trim();
     if (!qText && !qId) continue;
 
-    var qType = String((cType >= 0 ? row[cType] : row[1]) || 'PG').toUpperCase().trim();
-    if (qType !== 'PG' && qType !== 'PGK' && qType !== 'BS') {
-      qType = 'PG';
+    var qTypeRaw = String((cType >= 0 ? row[cType] : row[1]) || 'PG').toUpperCase().trim();
+    var qType = 'PG';
+    if (qTypeRaw === 'PGK' || qTypeRaw.indexOf('KOMPLEKS') >= 0 || qTypeRaw.indexOf('COMPLEX') >= 0) {
+      qType = 'PGK';
+    } else if (qTypeRaw === 'BS' || qTypeRaw === 'B/S' || qTypeRaw === 'B-S' || qTypeRaw.indexOf('BENAR') >= 0 || qTypeRaw.indexOf('SALAH') >= 0 || qTypeRaw.indexOf('TRUE') >= 0) {
+      qType = 'BS';
     }
 
     var optA = String((cOptA >= 0 ? row[cOptA] : row[5]) || '').trim();
@@ -335,28 +338,42 @@ function getQuestionsFromSheet(ss) {
     if (optC) options.push({ id: 'C', text: optC });
     if (optD) options.push({ id: 'D', text: optD });
 
-    var rawAnswers = String((cKey >= 0 ? row[cKey] : row[9]) || 'A').split(',');
-    var correctAnswers = rawAnswers.map(function(s) { return s.trim(); }).filter(function(s) { return s.length > 0; });
+    var rawAnswers = String((cKey >= 0 ? row[cKey] : row[9]) || 'A').split(/[,;\s/]+/);
+    var correctAnswers = rawAnswers.map(function(s) { return s.trim().toUpperCase(); }).filter(function(s) { return s.length > 0; });
     if (correctAnswers.length === 0) correctAnswers = ['A'];
 
     var statements = undefined;
     if (qType === 'BS') {
       statements = [];
-      if (optA) {
-        var isA = correctAnswers.some(function(a) { return a.indexOf('S1:BENAR') >= 0 || a === 'A:BENAR' || a === 'BENAR'; }) ? 'BENAR' : 'SALAH';
-        statements.push({ id: 'S1', text: optA, correct: isA });
-      }
-      if (optB) {
-        var isB = correctAnswers.some(function(a) { return a.indexOf('S2:BENAR') >= 0 || a === 'B:BENAR'; }) ? 'BENAR' : 'SALAH';
-        statements.push({ id: 'S2', text: optB, correct: isB });
-      }
-      if (optC) {
-        var isC = correctAnswers.some(function(a) { return a.indexOf('S3:BENAR') >= 0 || a === 'C:BENAR'; }) ? 'BENAR' : 'SALAH';
-        statements.push({ id: 'S3', text: optC, correct: isC });
-      }
-      if (optD) {
-        var isD = correctAnswers.some(function(a) { return a.indexOf('S4:BENAR') >= 0 || a === 'D:BENAR'; }) ? 'BENAR' : 'SALAH';
-        statements.push({ id: 'S4', text: optD, correct: isD });
+      var bsOpts = [optA, optB, optC, optD].filter(function(t) { return Boolean(t); });
+      if (bsOpts.length === 0) bsOpts = [optA || 'Pernyataan 1', optB || 'Pernyataan 2'];
+
+      for (var sIdx = 0; sIdx < bsOpts.length; sIdx++) {
+        var sId = 'S' + (sIdx + 1);
+        var letter = String.fromCharCode(65 + sIdx);
+        var p = correctAnswers[sIdx] || '';
+        var isBenar = false;
+
+        var expB = correctAnswers.some(function(a) {
+          return a === sId + ':BENAR' || a === sId + ':B' || a === letter + ':BENAR' || a === letter + ':B';
+        });
+        var expS = correctAnswers.some(function(a) {
+          return a === sId + ':SALAH' || a === sId + ':S' || a === letter + ':SALAH' || a === letter + ':S';
+        });
+
+        if (expB) {
+          isBenar = true;
+        } else if (expS) {
+          isBenar = false;
+        } else {
+          isBenar = (p === 'BENAR' || p === 'B' || p === 'TRUE' || p === 'T' || p === '1' || p === 'YA');
+        }
+
+        statements.push({
+          id: sId,
+          text: bsOpts[sIdx],
+          correct: isBenar ? 'BENAR' : 'SALAH'
+        });
       }
     }
 

@@ -68,14 +68,16 @@ export const AdminSettings: React.FC = () => {
     showToast('Identitas lembaga & alamat sekretariat dikembalikan ke default.', 'info');
   };
 
+  const [isPullingQuestions, setIsPullingQuestions] = useState(false);
+
   const handleSaveUrl = () => {
     sheetsSyncService.setUrl(appsScriptUrl);
-    showToast('URL Google Apps Script berhasil disimpan!', 'success');
+    showToast('URL / Link Google Spreadsheet berhasil disimpan!', 'success');
   };
 
   const handleTestConnection = async () => {
     if (!appsScriptUrl.trim()) {
-      showToast('Masukkan URL Web App Google Apps Script terlebih dahulu.', 'error');
+      showToast('Masukkan Link Google Spreadsheet atau Web App Apps Script terlebih dahulu.', 'error');
       return;
     }
 
@@ -83,11 +85,39 @@ export const AdminSettings: React.FC = () => {
     try {
       await sheetsSyncService.testConnection(appsScriptUrl.trim());
       sheetsSyncService.setUrl(appsScriptUrl.trim());
-      showToast('Sinyal tes berhasil dikirim ke Google Apps Script!', 'success');
+      showToast('Koneksi ke spreadsheet berhasil diverifikasi!', 'success');
     } catch (err: any) {
-      showToast(err.message || 'Gagal terhubung ke Google Apps Script.', 'error');
+      showToast(err.message || 'Gagal terhubung ke spreadsheet.', 'error');
     } finally {
       setIsTesting(false);
+    }
+  };
+
+  const handlePullQuestionsNow = async () => {
+    if (!appsScriptUrl.trim()) {
+      showToast('Masukkan Link Google Spreadsheet atau Web App Apps Script terlebih dahulu.', 'error');
+      return;
+    }
+
+    setIsPullingQuestions(true);
+    try {
+      sheetsSyncService.setUrl(appsScriptUrl.trim());
+      const res = await sheetsSyncService.pullSpreadsheetDetailed(appsScriptUrl.trim());
+      if (res.success && res.questions && res.questions.length > 0) {
+        storageService.saveQuestions(res.questions, true);
+        showToast(
+          `Alhamdulillah! Berhasil menarik dan menyinkronkan ${res.questions.length} butir soal dari ${res.source || 'spreadsheet'}. Bank soal kini 100% sama dengan server!`,
+          'success'
+        );
+      } else if (res.requiresAuth) {
+        showToast('Google Apps Script meminta otorisasi login akun. Cukup gunakan link Google Spreadsheet biasa.', 'warning');
+      } else {
+        showToast(res.error || 'Gagal membaca butir soal dari spreadsheet.', 'error');
+      }
+    } catch (err: any) {
+      showToast(err.message || 'Gagal menarik soal dari spreadsheet.', 'error');
+    } finally {
+      setIsPullingQuestions(false);
     }
   };
 
@@ -391,10 +421,10 @@ export const AdminSettings: React.FC = () => {
           <label className="block text-xs font-bold text-slate-800 flex items-center justify-between">
             <span className="flex items-center gap-1.5">
               <Link className="w-3.5 h-3.5 text-[#087443]" />
-              <span>URL Web App Google Apps Script (Exec URL)</span>
+              <span>URL Web App Apps Script atau Link Google Spreadsheet</span>
             </span>
             <span className="text-[11px] font-normal text-slate-400">
-              Contoh: https://script.google.com/macros/s/.../exec
+              Mendukung Link Spreadsheet & Web App Exec
             </span>
           </label>
 
@@ -403,7 +433,7 @@ export const AdminSettings: React.FC = () => {
               type="url"
               value={appsScriptUrl}
               onChange={(e) => setAppsScriptUrl(e.target.value)}
-              placeholder="https://script.google.com/macros/s/AKfycbx.../exec"
+              placeholder="https://docs.google.com/spreadsheets/d/1.../edit atau https://script.google.com/macros/s/AKfycbx.../exec"
               className="flex-1 p-2.5 rounded-lg border border-slate-300 text-xs font-mono text-slate-900 focus:outline-none focus:border-[#087443] focus:ring-1 focus:ring-[#087443] bg-white"
             />
             <div className="flex gap-2 flex-wrap">
@@ -418,10 +448,20 @@ export const AdminSettings: React.FC = () => {
                 type="button"
                 onClick={handleTestConnection}
                 disabled={isTesting}
-                className="py-2.5 px-4 bg-[#087443] hover:bg-[#065b34] text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                className="py-2.5 px-4 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
               >
-                <Send className="w-3.5 h-3.5" />
+                <Send className="w-3.5 h-3.5 text-emerald-700" />
                 <span>{isTesting ? 'Menguji...' : 'Tes Koneksi'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={handlePullQuestionsNow}
+                disabled={isPullingQuestions}
+                className="py-2.5 px-4 bg-[#087443] hover:bg-[#065b34] text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shadow-2xs"
+                title="Tarik langsung butir soal dari spreadsheet dan sinkronkan ke bank soal"
+              >
+                <RotateCcw className={`w-3.5 h-3.5 ${isPullingQuestions ? 'animate-spin' : ''}`} />
+                <span>{isPullingQuestions ? 'Menarik...' : 'Tarik Soal Sekarang'}</span>
               </button>
               {appsScriptUrl && (
                 <a
@@ -432,7 +472,7 @@ export const AdminSettings: React.FC = () => {
                   title="Cek respons langsung dari Google di tab baru"
                 >
                   <ExternalLink className="w-3.5 h-3.5 text-slate-500" />
-                  <span>Buka di Tab Baru</span>
+                  <span>Buka Tab Baru</span>
                 </a>
               )}
             </div>

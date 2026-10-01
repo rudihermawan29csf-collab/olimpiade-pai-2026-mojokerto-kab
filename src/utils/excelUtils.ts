@@ -120,32 +120,36 @@ export const excelUtils = {
               .map((k) => k.trim())
               .filter((k) => ['A', 'B', 'C', 'D'].includes(k));
 
-            const type: QuestionType = (jenisRaw === 'BS' || jenisRaw.includes('BENAR') || jenisRaw.includes('SALAH'))
+            const type: QuestionType = (jenisRaw === 'BS' || jenisRaw === 'B/S' || jenisRaw.includes('BENAR') || jenisRaw.includes('SALAH') || jenisRaw.includes('TRUE'))
               ? 'BS'
-              : jenisRaw === 'PGK'
+              : (jenisRaw === 'PGK' || jenisRaw.includes('KOMPLEKS') || jenisRaw.includes('COMPLEX'))
               ? 'PGK'
               : 'PG';
 
             if (type === 'BS') {
-              const rawParts = kunciRaw.split(/[,;\s]+/).map((k) => k.trim().toUpperCase()).filter(Boolean);
-              if (rawParts.length > 0) {
-                const bsKeys = rawParts.map((p, idx) => {
-                  if (p.includes('BENAR')) return `S${idx + 1}:BENAR`;
-                  if (p.includes('SALAH')) return `S${idx + 1}:SALAH`;
-                  return p;
-                });
-                keys.length = 0;
-                keys.push(...bsKeys);
-              } else {
-                keys.length = 0;
-                keys.push('S1:BENAR', 'S2:SALAH', 'S3:BENAR', 'S4:SALAH');
-              }
+              const rawParts = kunciRaw.split(/[,;\s/]+/).map((k) => k.trim().toUpperCase()).filter(Boolean);
+              const texts = [optA, optB, optC, optD].filter(Boolean);
+              const validTexts = texts.length > 0 ? texts : [optA || 'P1', optB || 'P2'];
+              keys.length = 0;
+              validTexts.forEach((_, idx) => {
+                const sId = `S${idx + 1}`;
+                const p = rawParts[idx] || '';
+                const isBenar = p === 'BENAR' || p === 'B' || p === 'TRUE' || p === 'T' || p.includes('BENAR') || p.includes(':BENAR');
+                keys.push(`${sId}:${isBenar ? 'BENAR' : 'SALAH'}`);
+              });
+            } else if (type === 'PGK') {
+              const pgkKeys = kunciRaw
+                .split(/[,;\s]+/)
+                .map((k) => k.trim().toUpperCase())
+                .filter((k) => ['A', 'B', 'C', 'D'].includes(k));
+              keys.length = 0;
+              keys.push(...(pgkKeys.length > 0 ? pgkKeys : ['A']));
             } else {
               if (keys.length === 0) {
                 errors.push('Kunci jawaban wajib berisi A, B, C, atau D');
               }
-              if (type === 'PG' && keys.length > 1) {
-                errors.push('Soal PG hanya boleh memiliki 1 kunci jawaban');
+              if (keys.length > 1) {
+                keys.length = 1; // Auto normalize PG to single key
               }
             }
 
